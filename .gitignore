@@ -132,24 +132,3 @@ signing_key.pem
 signing_key.priv
 signing_key.x509
 x509.genkey
-
-# Kconfig presets
-/all.config
-/alldef.config
-/allmod.config
-/allno.config
-/allrandom.config
-/allyes.config
-
-# Kdevelop4
-*.kdev4
-
-# Clang's compilation database file
-/compile_commands.json
-
-# generated defconfigs
-arch/*/configs/vendor/*_defconfig
-
-# vendor device tree directories
-arch/arm64/boot/dts/vendor
-arch/arm/boot/dts/vendor
