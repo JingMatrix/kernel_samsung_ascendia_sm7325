@@ -32,6 +32,10 @@
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/sched.h>
 
+#if IS_ENABLED(CONFIG_SEC_DEBUG_SCHED_LOG)
+#include <linux/sec_debug.h>
+#endif
+
 /*
  * Export tracepoints that act as a bare tracehook (ie: have no trace event
  * associated with them) to allow external modules to probe them.
@@ -1449,6 +1453,9 @@ static inline void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 
 void activate_task(struct rq *rq, struct task_struct *p, int flags)
 {
+	if (task_on_rq_migrating(p))
+		flags |= ENQUEUE_MIGRATED;
+
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible--;
 
@@ -1595,8 +1602,11 @@ static inline bool is_per_cpu_kthread(struct task_struct *p)
  */
 static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
 {
-	if (!cpumask_test_cpu(cpu, p->cpus_ptr))
-		return false;
+#ifdef CONFIG_SEC_PERF_MANAGER
+	if (!p->drawing_flag)
+#endif
+		if (!cpumask_test_cpu(cpu, p->cpus_ptr))
+			return false;
 
 	if (is_per_cpu_kthread(p))
 		return cpu_online(cpu);
@@ -3892,7 +3902,6 @@ void scheduler_tick(void)
 		clear_reserved(cpu);
 	rq_unlock(rq, &rf);
 #endif
-
 	trace_android_vh_scheduler_tick(rq);
 }
 
@@ -4148,8 +4157,7 @@ static noinline void __schedule_bug(struct task_struct *prev)
 		print_ip_sym(preempt_disable_ip);
 		pr_cont("\n");
 	}
-	if (panic_on_warn)
-		panic("scheduling while atomic\n");
+	check_panic_on_warn("scheduling while atomic");
 
 #ifdef CONFIG_PANIC_ON_SCHED_BUG
 	BUG();
@@ -4372,6 +4380,9 @@ static void __sched notrace __schedule(bool preempt)
 		++*switch_count;
 
 		trace_sched_switch(preempt, prev, next);
+#if IS_ENABLED(CONFIG_SEC_DEBUG_SCHED_LOG)
+		sec_debug_task_sched_log(cpu, preempt, next, prev);
+#endif
 
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next, &rf);
@@ -5941,14 +5952,14 @@ SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
 	if (len & (sizeof(unsigned long)-1))
 		return -EINVAL;
 
-	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
+	if (!zalloc_cpumask_var(&mask, GFP_KERNEL))
 		return -ENOMEM;
 
 	ret = sched_getaffinity(pid, mask);
 	if (ret == 0) {
 		unsigned int retlen = min(len, cpumask_size());
 
-		if (copy_to_user(user_mask_ptr, mask, retlen))
+		if (copy_to_user(user_mask_ptr, cpumask_bits(mask), retlen))
 			ret = -EFAULT;
 		else
 			ret = retlen;

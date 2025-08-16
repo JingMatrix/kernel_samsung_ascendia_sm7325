@@ -871,6 +871,10 @@ static int subsys_ramdump(int enable, const struct subsys_desc *subsys)
 
 	if (!enable)
 		return 0;
+#ifdef CONFIG_QGKI_MSM_BOOT_TIME_MARKER
+	if (!strcmp(subsys->name, "modem"))
+		update_marker("M - Modem Dump start");
+#endif
 
 	return pil_do_ramdump(&d->desc, d->ramdump_dev, d->minidump_dev);
 }
@@ -890,6 +894,11 @@ static void subsys_crash_shutdown(const struct subsys_desc *subsys)
 		qcom_smem_state_update_bits(d->state,
 			BIT(d->force_stop_bit),
 			BIT(d->force_stop_bit));
+#if defined(CONFIG_SEC_DEBUG)
+		if (likely(!in_atomic()))
+			msleep(CRASH_STOP_ACK_TO_MS);
+		else
+#endif
 		mdelay(CRASH_STOP_ACK_TO_MS);
 	}
 }
@@ -915,6 +924,10 @@ static irqreturn_t subsys_err_fatal_intr_handler (int irq, void *drv_data)
 							d->subsys_desc.name);
 		return IRQ_HANDLED;
 	}
+#ifdef CONFIG_QGKI_MSM_BOOT_TIME_MARKER
+	if (!strcmp(d->subsys_desc.name, "modem"))
+		update_marker("M - Modem crash");
+#endif
 	subsys_set_crash_status(d->subsys, CRASH_STATUS_ERR_FATAL);
 	log_failure_reason(d);
 	subsystem_restart_dev(d->subsys);
@@ -1552,6 +1565,10 @@ load_from_pil:
 		rc = PTR_ERR(d->subsys);
 		goto err_subsys;
 	}
+	
+	/* NOTE: copy smem_state here for reset reason gpio */
+	if (!strncmp(d->subsys_desc.name, "modem", 5)) 
+		d->subsys_desc.state = d->state;
 
 	rc = subsys_setup_irqs(pdev);
 	if (rc) {

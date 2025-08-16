@@ -314,6 +314,8 @@ static void put_super(struct super_block *sb)
 	spin_unlock(&sb_lock);
 }
 
+/* @fs.sec -- 89e449513e5bea6196d9aaf62a6936ae -- */
+void (*ufs_debug_func)(void *) = NULL;
 
 /**
  *	deactivate_locked_super	-	drop an active reference to superblock
@@ -905,6 +907,7 @@ int reconfigure_super(struct fs_context *fc)
 	struct super_block *sb = fc->root->d_sb;
 	int retval;
 	bool remount_ro = false;
+	bool remount_rw = false;
 	bool force = fc->sb_flags & SB_FORCE;
 
 	if (fc->sb_flags_mask & ~MS_RMT_MASK)
@@ -921,7 +924,7 @@ int reconfigure_super(struct fs_context *fc)
 		if (!(fc->sb_flags & SB_RDONLY) && bdev_read_only(sb->s_bdev))
 			return -EACCES;
 #endif
-
+		remount_rw = !(fc->sb_flags & SB_RDONLY) && sb_rdonly(sb);
 		remount_ro = (fc->sb_flags & SB_RDONLY) && !sb_rdonly(sb);
 	}
 
@@ -951,6 +954,14 @@ int reconfigure_super(struct fs_context *fc)
 			if (retval)
 				return retval;
 		}
+	} else if (remount_rw) {
+		/*
+		 * We set s_readonly_remount here to protect filesystem's
+		 * reconfigure code from writes from userspace until
+		 * reconfigure finishes.
+		 */
+		sb->s_readonly_remount = 1;
+		smp_wmb();
 	}
 
 	if (fc->ops->reconfigure) {
@@ -964,8 +975,14 @@ int reconfigure_super(struct fs_context *fc)
 		}
 	}
 
+#ifdef CONFIG_FIVE
+	WRITE_ONCE(sb->s_flags, ((sb->s_flags & ~fc->sb_flags_mask) |
+				 (fc->sb_flags & fc->sb_flags_mask) |
+				 MS_I_VERSION));
+#else
 	WRITE_ONCE(sb->s_flags, ((sb->s_flags & ~fc->sb_flags_mask) |
 				 (fc->sb_flags & fc->sb_flags_mask)));
+#endif
 	/* Needs to be ordered wrt mnt_is_readonly() */
 	smp_wmb();
 	sb->s_readonly_remount = 0;
@@ -1588,25 +1605,20 @@ int vfs_get_tree(struct fs_context *fc)
 }
 EXPORT_SYMBOL(vfs_get_tree);
 
-/*
- * Setup private BDI for given superblock. It gets automatically cleaned up
- * in generic_shutdown_super().
- */
-int super_setup_bdi_name(struct super_block *sb, char *fmt, ...)
+static int __super_setup_bdi_name(struct super_block *sb,
+				  struct backing_dev_info *(*bdi_alloc_func)(gfp_t),
+				  char *fmt, va_list args)
 {
 	struct backing_dev_info *bdi;
 	int err;
-	va_list args;
 
-	bdi = bdi_alloc(GFP_KERNEL);
+	bdi = bdi_alloc_func(GFP_KERNEL);
 	if (!bdi)
 		return -ENOMEM;
 
 	bdi->name = sb->s_type->name;
 
-	va_start(args, fmt);
 	err = bdi_register_va(bdi, fmt, args);
-	va_end(args);
 	if (err) {
 		bdi_put(bdi);
 		return err;
@@ -1616,7 +1628,40 @@ int super_setup_bdi_name(struct super_block *sb, char *fmt, ...)
 
 	return 0;
 }
+
+/*
+ * Setup private BDI for given superblock. It gets automatically cleaned up
+ * in generic_shutdown_super().
+ */
+int super_setup_bdi_name(struct super_block *sb, char *fmt, ...)
+{
+	va_list args;
+	int ret;
+
+	va_start(args, fmt);
+	ret =  __super_setup_bdi_name(sb, bdi_alloc, fmt, args);
+	va_end(args);
+
+	return ret;
+}
 EXPORT_SYMBOL(super_setup_bdi_name);
+
+/*
+ * Setup private SEC_BDI for given superblock. It gets automatically cleaned up
+ * in generic_shutdown_super().
+ */
+int sec_super_setup_bdi_name(struct super_block *sb, char *fmt, ...)
+{
+	va_list args;
+	int ret;
+
+	va_start(args, fmt);
+	ret =  __super_setup_bdi_name(sb, sec_bdi_alloc, fmt, args);
+	va_end(args);
+
+	return ret;
+}
+EXPORT_SYMBOL(sec_super_setup_bdi_name);
 
 /*
  * Setup private BDI for given superblock. I gets automatically cleaned up
@@ -1691,11 +1736,9 @@ static void lockdep_sb_freeze_acquire(struct super_block *sb)
 		percpu_rwsem_acquire(sb->s_writers.rw_sem + level, 0, _THIS_IP_);
 }
 
-static void sb_freeze_unlock(struct super_block *sb)
+static void sb_freeze_unlock(struct super_block *sb, int level)
 {
-	int level;
-
-	for (level = SB_FREEZE_LEVELS - 1; level >= 0; level--)
+	for (level--; level >= 0; level--)
 		percpu_up_write(sb->s_writers.rw_sem + level);
 }
 
@@ -1766,7 +1809,14 @@ int freeze_super(struct super_block *sb)
 	sb_wait_write(sb, SB_FREEZE_PAGEFAULT);
 
 	/* All writers are done so after syncing there won't be dirty data */
-	sync_filesystem(sb);
+	ret = sync_filesystem(sb);
+	if (ret) {
+		sb->s_writers.frozen = SB_UNFROZEN;
+		sb_freeze_unlock(sb, SB_FREEZE_PAGEFAULT);
+		wake_up(&sb->s_writers.wait_unfrozen);
+		deactivate_locked_super(sb);
+		return ret;
+	}
 
 	/* Now wait for internal filesystem counter */
 	sb->s_writers.frozen = SB_FREEZE_FS;
@@ -1778,7 +1828,7 @@ int freeze_super(struct super_block *sb)
 			printk(KERN_ERR
 				"VFS:Filesystem freeze failed\n");
 			sb->s_writers.frozen = SB_UNFROZEN;
-			sb_freeze_unlock(sb);
+			sb_freeze_unlock(sb, SB_FREEZE_FS);
 			wake_up(&sb->s_writers.wait_unfrozen);
 			deactivate_locked_super(sb);
 			return ret;
@@ -1829,7 +1879,7 @@ static int thaw_super_locked(struct super_block *sb)
 	}
 
 	sb->s_writers.frozen = SB_UNFROZEN;
-	sb_freeze_unlock(sb);
+	sb_freeze_unlock(sb, SB_FREEZE_FS);
 out:
 	wake_up(&sb->s_writers.wait_unfrozen);
 	deactivate_locked_super(sb);

@@ -342,6 +342,10 @@ static int pci_call_probe(struct pci_driver *drv, struct pci_dev *dev,
 	node = dev_to_node(&dev->dev);
 	dev->is_probed = 1;
 
+#ifdef CONFIG_SEC_PCIE
+	dev->drv_probe_ready = 0;
+#endif
+
 	cpu_hotplug_disable();
 
 	/*
@@ -361,6 +365,11 @@ static int pci_call_probe(struct pci_driver *drv, struct pci_dev *dev,
 
 	dev->is_probed = 0;
 	cpu_hotplug_enable();
+
+#ifdef CONFIG_SEC_PCIE
+	dev->drv_probe_ready = !error;
+	dev_info(&dev->dev, "PCI probe function return:%d\n", dev->drv_probe_ready);
+#endif
 	return error;
 }
 
@@ -956,7 +965,7 @@ static int pci_pm_resume_noirq(struct device *dev)
 	pcie_pme_root_status_cleanup(pci_dev);
 
 	if (!skip_bus_pm && prev_state == PCI_D3cold)
-		pci_bridge_wait_for_secondary_bus(pci_dev);
+		pci_bridge_wait_for_secondary_bus(pci_dev, "resume", PCI_RESET_WAIT);
 
 	if (pci_has_legacy_pm_support(pci_dev))
 		return pci_legacy_resume_early(dev);
@@ -1377,7 +1386,7 @@ static int pci_pm_runtime_resume(struct device *dev)
 	pci_fixup_device(pci_fixup_resume, pci_dev);
 
 	if (prev_state == PCI_D3cold)
-		pci_bridge_wait_for_secondary_bus(pci_dev);
+		pci_bridge_wait_for_secondary_bus(pci_dev, "resume", PCI_RESET_WAIT);
 
 #ifdef CONFIG_PCI_QTI
 skip_restore:

@@ -779,11 +779,11 @@ static struct psi_group *iterate_groups(struct task_struct *task, void **iter)
 		else
 			cgroup = cgroup_parent(*iter);
 
-		if (cgroup && cgroup_parent(cgroup)) {
+        if (cgroup && cgroup_parent(cgroup)) {
 			*iter = cgroup;
 			return cgroup_psi(cgroup);
 		}
-	}
+    }
 #endif
 	*iter = &psi_system;
 	return &psi_system;
@@ -1137,10 +1137,11 @@ void psi_trigger_destroy(struct psi_trigger *t)
 
 	group = t->group;
 	/*
-	 * Wakeup waiters to stop polling. Can happen if cgroup is deleted
-	 * from under a polling process.
+	 * Wakeup waiters to stop polling and clear the queue to prevent it from
+	 * being accessed later. Can happen if cgroup is deleted from under a
+	 * polling process.
 	 */
-	wake_up_interruptible(&t->event_wait);
+	wake_up_pollfree(&t->event_wait);
 
 	mutex_lock(&group->trigger_lock);
 

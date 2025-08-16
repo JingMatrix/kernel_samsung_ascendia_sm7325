@@ -29,6 +29,10 @@
 #include "rpmsg_internal.h"
 #include "qcom_glink_native.h"
 
+#if IS_ENABLED(CONFIG_SEC_PM)
+#include <linux/wakeup_reason.h>
+#endif
+
 #define GLINK_LOG_PAGE_CNT 2
 #define GLINK_INFO(ctxt, x, ...)					  \
 	ipc_log_string(ctxt, "[%s]: "x, __func__, ##__VA_ARGS__)
@@ -1124,6 +1128,7 @@ static void qcom_glink_handle_intent(struct qcom_glink *glink,
 	spin_unlock_irqrestore(&glink->idr_lock, flags);
 	if (!channel) {
 		dev_err(glink->dev, "intents for non-existing channel\n");
+		qcom_glink_rx_advance(glink, ALIGN(msglen, 8));
 		return;
 	}
 
@@ -1262,6 +1267,9 @@ static irqreturn_t qcom_glink_native_intr(int irq, void *data)
 
 	if (should_wake) {
 		pr_info("%s: %d triggered %s\n", __func__, irq, glink->irqname);
+#if IS_ENABLED(CONFIG_SEC_PM)
+		log_irq_wakeup_reason(irq);
+#endif
 		glink_resume_pkt = true;
 		pm_system_wakeup();
 	}
@@ -1887,7 +1895,7 @@ static void qcom_glink_rx_close(struct qcom_glink *glink, unsigned int rcid)
 	kthread_cancel_work_sync(&channel->intent_work);
 
 	if (channel->rpdev) {
-		strlcpy(chinfo.name, channel->name, sizeof(chinfo.name));
+		strscpy_pad(chinfo.name, channel->name, sizeof(chinfo.name));
 		chinfo.src = RPMSG_ADDR_ANY;
 		chinfo.dst = RPMSG_ADDR_ANY;
 

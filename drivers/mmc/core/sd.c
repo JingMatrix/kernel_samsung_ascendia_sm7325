@@ -136,6 +136,7 @@ static int mmc_decode_csd(struct mmc_card *card)
 			csd->erase_size <<= csd->write_blkbits - 9;
 		}
 
+		/* permanent write protection */
 		if (UNSTUFF_BITS(resp, 13, 1))
 			mmc_card_set_readonly(card);
 		break;
@@ -173,6 +174,7 @@ static int mmc_decode_csd(struct mmc_card *card)
 		csd->write_partial = 0;
 		csd->erase_size = 1;
 
+		/* permanent write protection */
 		if (UNSTUFF_BITS(resp, 13, 1))
 			mmc_card_set_readonly(card);
 		break;
@@ -853,7 +855,8 @@ try_again:
 	 * the CCS bit is set as well. We deliberately deviate from the spec in
 	 * regards to this, which allows UHS-I to be supported for SDSC cards.
 	 */
-	if (!mmc_host_is_spi(host) && rocr && (*rocr & 0x01000000)) {
+	if (!mmc_host_is_spi(host) && (ocr & SD_OCR_S18R) &&
+	    rocr && (*rocr & SD_ROCR_S18A)) {
 		err = mmc_set_uhs_voltage(host, pocr);
 		if (err == -EAGAIN) {
 			retries--;
@@ -1118,7 +1121,7 @@ retry:
 					mmc_remove_card(card);
 				goto retry;
 			}
-			goto done;
+			goto cont;
 		}
 	}
 
@@ -1155,6 +1158,7 @@ retry:
 		}
 	}
 
+cont:
 	if (host->cqe_ops && !host->cqe_enabled) {
 		err = host->cqe_ops->cqe_enable(host, card);
 		if (!err) {
@@ -1172,11 +1176,12 @@ retry:
 		err = -EINVAL;
 		goto free_card;
 	}
-done:
+
 #if defined(CONFIG_SDC_QTI)
 	card->clk_scaling_highest = mmc_sd_get_max_clock(card);
 	card->clk_scaling_lowest = host->f_min;
 #endif
+
 	host->card = card;
 	return 0;
 
@@ -1465,6 +1470,8 @@ err:
 	mmc_detach_bus(host);
 
 	pr_err("%s: error %d whilst initialising SD card\n",
+		mmc_hostname(host), err);
+	ST_LOG("%s: error %d whilst initialising SD card\n",
 		mmc_hostname(host), err);
 
 	return err;

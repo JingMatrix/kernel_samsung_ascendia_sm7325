@@ -22,6 +22,10 @@
 #include <linux/unicode.h>
 #include <linux/fscrypt.h>
 
+#ifdef CONFIG_FSCRYPT_SDP
+#include "crypto/fscrypt_private.h"
+#endif
+
 #include <linux/uaccess.h>
 
 #include "internal.h"
@@ -885,8 +889,8 @@ out:
 EXPORT_SYMBOL_GPL(simple_attr_read);
 
 /* interpret the buffer as a number to call the set function with */
-ssize_t simple_attr_write(struct file *file, const char __user *buf,
-			  size_t len, loff_t *ppos)
+static ssize_t simple_attr_write_xsigned(struct file *file, const char __user *buf,
+			  size_t len, loff_t *ppos, bool is_signed)
 {
 	struct simple_attr *attr;
 	unsigned long long val;
@@ -907,7 +911,10 @@ ssize_t simple_attr_write(struct file *file, const char __user *buf,
 		goto out;
 
 	attr->set_buf[size] = '\0';
-	ret = kstrtoull(attr->set_buf, 0, &val);
+	if (is_signed)
+		ret = kstrtoll(attr->set_buf, 0, &val);
+	else
+		ret = kstrtoull(attr->set_buf, 0, &val);
 	if (ret)
 		goto out;
 	ret = attr->set(attr->data, val);
@@ -917,7 +924,20 @@ out:
 	mutex_unlock(&attr->mutex);
 	return ret;
 }
+
+ssize_t simple_attr_write(struct file *file, const char __user *buf,
+			  size_t len, loff_t *ppos)
+{
+	return simple_attr_write_xsigned(file, buf, len, ppos, false);
+}
 EXPORT_SYMBOL_GPL(simple_attr_write);
+
+ssize_t simple_attr_write_signed(struct file *file, const char __user *buf,
+			  size_t len, loff_t *ppos)
+{
+	return simple_attr_write_xsigned(file, buf, len, ppos, true);
+}
+EXPORT_SYMBOL_GPL(simple_attr_write_signed);
 
 /**
  * generic_fh_to_dentry - generic helper for the fh_to_dentry export operation
@@ -1298,6 +1318,17 @@ bool is_empty_dir_inode(struct inode *inode)
 		(inode->i_op == &empty_dir_inode_operations);
 }
 
+#ifdef CONFIG_FSCRYPT_SDP
+static int fscrypt_sdp_d_delete(const struct dentry *dentry)
+{
+	return fscrypt_sdp_d_delete_wrapper(dentry);
+}
+
+static const struct dentry_operations sdp_dentry_ops = {
+	.d_delete	= fscrypt_sdp_d_delete,
+};
+#endif
+
 #ifdef CONFIG_UNICODE
 bool needs_casefold(const struct inode *dir)
 {
@@ -1375,12 +1406,18 @@ EXPORT_SYMBOL(generic_ci_d_hash);
 static const struct dentry_operations generic_ci_dentry_ops = {
 	.d_hash = generic_ci_d_hash,
 	.d_compare = generic_ci_d_compare,
+#ifdef CONFIG_FSCRYPT_SDP
+	.d_delete	= fscrypt_sdp_d_delete,
+#endif
 };
 #endif
 
 #ifdef CONFIG_FS_ENCRYPTION
 static const struct dentry_operations generic_encrypted_dentry_ops = {
 	.d_revalidate = fscrypt_d_revalidate,
+#ifdef CONFIG_FSCRYPT_SDP
+	.d_delete	= fscrypt_sdp_d_delete,
+#endif
 };
 #endif
 
@@ -1389,6 +1426,9 @@ static const struct dentry_operations generic_encrypted_ci_dentry_ops = {
 	.d_hash = generic_ci_d_hash,
 	.d_compare = generic_ci_d_compare,
 	.d_revalidate = fscrypt_d_revalidate,
+#ifdef CONFIG_FSCRYPT_SDP
+	.d_delete	= fscrypt_sdp_d_delete,
+#endif
 };
 #endif
 
@@ -1417,6 +1457,12 @@ void generic_set_encrypted_ci_d_ops(struct inode *dir, struct dentry *dentry)
 #ifdef CONFIG_UNICODE
 	if (dir->i_sb->s_encoding) {
 		d_set_d_op(dentry, &generic_ci_dentry_ops);
+		return;
+	}
+#endif
+#ifdef CONFIG_FSCRYPT_SDP
+	if (dir->i_crypt_info) {
+		d_set_d_op(dentry, &sdp_dentry_ops);
 		return;
 	}
 #endif

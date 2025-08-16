@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2008-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <uapi/linux/msm_ion.h>
@@ -344,6 +344,9 @@ static void kgsl_destroy_ion(struct kgsl_memdesc *memdesc)
 		struct kgsl_mem_entry, memdesc);
 	struct kgsl_dma_buf_meta *meta = entry->priv_data;
 
+	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
+		return;
+
 	if (meta != NULL) {
 		remove_dmabuf_list(meta);
 		dma_buf_unmap_attachment(meta->attach, meta->table,
@@ -366,6 +369,9 @@ static void kgsl_destroy_anon(struct kgsl_memdesc *memdesc)
 	int i = 0, j;
 	struct scatterlist *sg;
 	struct page *page;
+
+	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
+		return;
 
 	for_each_sg(memdesc->sgt->sgl, sg, memdesc->sgt->nents, i) {
 		page = sg_page(sg);
@@ -2634,6 +2640,7 @@ static int kgsl_setup_dmabuf_useraddr(struct kgsl_device *device,
 	if (vma && vma->vm_file) {
 		int fd;
 
+		
 		ret = check_vma_flags(vma, entry->memdesc.flags);
 		if (ret) {
 			up_read(&current->mm->mmap_sem);
@@ -4325,6 +4332,9 @@ static void _unregister_device(struct kgsl_device *device)
 {
 	int minor;
 
+	if (device->gpu_sysfs_kobj.state_initialized)
+		kobject_del(&device->gpu_sysfs_kobj);
+
 	mutex_lock(&kgsl_driver.devlock);
 	for (minor = 0; minor < ARRAY_SIZE(kgsl_driver.devp); minor++) {
 		if (device == kgsl_driver.devp[minor]) {
@@ -4516,12 +4526,6 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 	device->pwrctrl.interrupt_num = status;
 	disable_irq(device->pwrctrl.interrupt_num);
 
-	rwlock_init(&device->context_lock);
-	spin_lock_init(&device->submit_lock);
-
-	idr_init(&device->timelines);
-	spin_lock_init(&device->timelines_lock);
-
 	device->events_wq = alloc_workqueue("kgsl-events",
 		WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS | WQ_HIGHPRI, 0);
 
@@ -4535,6 +4539,12 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 	status = kgsl_mmu_probe(device);
 	if (status != 0)
 		goto error_pwrctrl_close;
+
+	rwlock_init(&device->context_lock);
+	spin_lock_init(&device->submit_lock);
+
+	idr_init(&device->timelines);
+	spin_lock_init(&device->timelines_lock);
 
 	kgsl_device_debugfs_init(device);
 
@@ -4569,9 +4579,6 @@ void kgsl_device_platform_remove(struct kgsl_device *device)
 
 	kgsl_device_snapshot_close(device);
 
-	if (device->gpu_sysfs_kobj.state_initialized)
-		kobject_del(&device->gpu_sysfs_kobj);
-
 	idr_destroy(&device->context_idr);
 	idr_destroy(&device->timelines);
 
@@ -4590,6 +4597,27 @@ void kgsl_device_platform_remove(struct kgsl_device *device)
 	kgsl_device_debugfs_close(device);
 	_unregister_device(device);
 }
+
+#ifdef CONFIG_QCOM_KGSL
+static int kgsl_sharedmem_size_notifier(struct notifier_block *nb,
+					unsigned long action, void *data)
+{
+	struct seq_file *s;
+
+	s = (struct seq_file *)data;
+	if (s != NULL)
+		seq_printf(s, "KgslSharedmem:  %8lu kB\n",
+			atomic_long_read(&kgsl_driver.stats.page_alloc) >> 10);
+	else
+		pr_cont("KgslSharedmem:%lukB ",
+			atomic_long_read(&kgsl_driver.stats.page_alloc) >> 10);
+	return 0;
+}
+
+static struct notifier_block kgsl_sharedmem_size_nb = {
+	.notifier_call = kgsl_sharedmem_size_notifier,
+};
+#endif
 
 void kgsl_core_exit(void)
 {
@@ -4628,6 +4656,9 @@ void kgsl_core_exit(void)
 
 	kfree(memfree.list);
 	memset(&memfree, 0, sizeof(memfree));
+#ifdef CONFIG_QCOM_KGSL
+	show_mem_extra_notifier_unregister(&kgsl_sharedmem_size_nb);
+#endif
 
 	unregister_chrdev_region(kgsl_driver.major,
 		ARRAY_SIZE(kgsl_driver.devp));
@@ -4742,6 +4773,9 @@ int __init kgsl_core_init(void)
 	memfree.list = kcalloc(MEMFREE_ENTRIES, sizeof(struct memfree_entry),
 		GFP_KERNEL);
 
+#ifdef CONFIG_QCOM_KGSL
+	show_mem_extra_notifier_register(&kgsl_sharedmem_size_nb);
+#endif
 	place_marker("M - DRIVER KGSL Ready");
 
 	return 0;

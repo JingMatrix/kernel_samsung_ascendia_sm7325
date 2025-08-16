@@ -14,6 +14,10 @@
 #include "edac_mc.h"
 #include "edac_device.h"
 
+#if IS_ENABLED(CONFIG_SEC_USER_RESET_DEBUG)
+#include <linux/sec_debug.h>
+#endif
+
 #define EDAC_LLCC                       "qcom_llcc"
 
 #define LLCC_ERP_PANIC_ON_CE            1
@@ -258,15 +262,75 @@ clear:
 	return qcom_llcc_clear_error_status(err_type, drv);
 }
 
+#if IS_ENABLED(CONFIG_SEC_USER_RESET_DEBUG)
+extern int ap_health_data_write(ap_health_t *data);
+extern ap_health_t *ap_health_data_read(void);
+extern int dbg_partition_notifier_register(struct notifier_block *nb);
+
+static ap_health_t *p_health;
+static ap_health_t tmp_health;
+
+static int update_llcc_edac_count(int etype)
+{
+	if (p_health) {
+		switch (etype) {
+			case LLCC_DRAM_CE:
+				p_health->cache.edac_llcc_data_ram.ce_cnt++;
+				p_health->daily_cache.edac_llcc_data_ram.ce_cnt++;
+				break;
+			case LLCC_DRAM_UE:
+				p_health->cache.edac_llcc_data_ram.ue_cnt++;
+				p_health->daily_cache.edac_llcc_data_ram.ue_cnt++;
+				break;
+			case LLCC_TRAM_CE:
+				p_health->cache.edac_llcc_tag_ram.ce_cnt++;
+				p_health->daily_cache.edac_llcc_tag_ram.ce_cnt++;
+				break;
+			case LLCC_TRAM_UE:
+				p_health->cache.edac_llcc_tag_ram.ue_cnt++;
+				p_health->daily_cache.edac_llcc_tag_ram.ue_cnt++;
+				break;
+		}
+		ap_health_data_write(p_health);
+	} else {
+		tmp_health.header.magic = AP_HEALTH_MAGIC;
+		switch (etype) {
+			case LLCC_DRAM_CE:
+				tmp_health.cache.edac_llcc_data_ram.ce_cnt++;
+				tmp_health.daily_cache.edac_llcc_data_ram.ce_cnt++;
+				break;
+			case LLCC_DRAM_UE:
+				tmp_health.cache.edac_llcc_data_ram.ue_cnt++;
+				tmp_health.daily_cache.edac_llcc_data_ram.ue_cnt++;
+				break;
+			case LLCC_TRAM_CE:
+				tmp_health.cache.edac_llcc_tag_ram.ce_cnt++;
+				tmp_health.daily_cache.edac_llcc_tag_ram.ce_cnt++;
+				break;
+			case LLCC_TRAM_UE:
+				tmp_health.cache.edac_llcc_tag_ram.ue_cnt++;
+				tmp_health.daily_cache.edac_llcc_tag_ram.ue_cnt++;
+				break;
+		}
+	}
+
+	return 0;
+}
+#endif
+
 static int
 dump_syn_reg(struct edac_device_ctl_info *edev_ctl, int err_type, u32 bank)
 {
-	struct llcc_drv_data *drv = edev_ctl->pvt_info;
+	struct llcc_drv_data *drv = edev_ctl->dev->platform_data;
 	int ret;
 
 	ret = dump_syn_reg_values(drv, bank, err_type);
 	if (ret)
 		return ret;
+
+#if IS_ENABLED(CONFIG_SEC_USER_RESET_DEBUG)
+	update_llcc_edac_count(err_type);
+#endif
 
 	switch (err_type) {
 	case LLCC_DRAM_CE:
@@ -298,7 +362,7 @@ static irqreturn_t
 llcc_ecc_irq_handler(int irq, void *edev_ctl)
 {
 	struct edac_device_ctl_info *edac_dev_ctl = edev_ctl;
-	struct llcc_drv_data *drv = edac_dev_ctl->pvt_info;
+	struct llcc_drv_data *drv = edac_dev_ctl->dev->platform_data;
 	irqreturn_t irq_rc = IRQ_NONE;
 	u32 drp_error, trp_error, i;
 	bool irq_handled = false;
@@ -349,6 +413,50 @@ static void qcom_llcc_poll_cache_errors(struct edac_device_ctl_info *edev_ctl)
 {
 	llcc_ecc_irq_handler(0, edev_ctl);
 }
+
+#if IS_ENABLED(CONFIG_SEC_USER_RESET_DEBUG)
+static int llcc_edac_dbg_part_notifier_callback(
+		struct notifier_block *nb, unsigned long action, void *data)
+{
+	switch (action) {
+		case DBG_PART_DRV_INIT_DONE:
+			p_health = ap_health_data_read();
+			if (tmp_health.header.magic == AP_HEALTH_MAGIC) {
+				p_health->cache.edac_llcc_data_ram.ce_cnt +=
+					tmp_health.cache.edac_llcc_data_ram.ce_cnt;
+				p_health->daily_cache.edac_llcc_data_ram.ce_cnt +=
+					tmp_health.daily_cache.edac_llcc_data_ram.ce_cnt;
+				p_health->cache.edac_llcc_data_ram.ue_cnt +=
+					tmp_health.cache.edac_llcc_data_ram.ue_cnt;
+				p_health->daily_cache.edac_llcc_data_ram.ue_cnt +=
+					tmp_health.daily_cache.edac_llcc_data_ram.ue_cnt;
+				p_health->cache.edac_llcc_tag_ram.ce_cnt +=
+					tmp_health.cache.edac_llcc_tag_ram.ce_cnt;
+				p_health->daily_cache.edac_llcc_tag_ram.ce_cnt +=
+					tmp_health.daily_cache.edac_llcc_tag_ram.ce_cnt;
+				p_health->cache.edac_llcc_tag_ram.ue_cnt +=
+					tmp_health.cache.edac_llcc_tag_ram.ue_cnt;
+				p_health->daily_cache.edac_llcc_tag_ram.ue_cnt +=
+					tmp_health.daily_cache.edac_llcc_tag_ram.ue_cnt;
+
+				ap_health_data_write(p_health);
+
+				pr_info("ap_health llcc edac updated\n");
+				memset((void *)&tmp_health, 0, sizeof(ap_health_t));
+			}
+
+			break;
+		default:
+			return NOTIFY_DONE;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block llcc_edac_dbg_part_notifier = {
+	.notifier_call = llcc_edac_dbg_part_notifier_callback,
+};
+#endif
 
 static int qcom_llcc_edac_probe(struct platform_device *pdev)
 {
@@ -405,6 +513,10 @@ static int qcom_llcc_edac_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, edev_ctl);
+#if IS_ENABLED(CONFIG_SEC_USER_RESET_DEBUG)
+	memset((void *)&tmp_health, 0, sizeof(ap_health_t));
+	dbg_partition_notifier_register(&llcc_edac_dbg_part_notifier);
+#endif
 	return rc;
 
 out_dev:

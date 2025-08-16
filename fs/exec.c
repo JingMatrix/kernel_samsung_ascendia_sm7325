@@ -63,6 +63,7 @@
 #include <linux/oom.h>
 #include <linux/compat.h>
 #include <linux/vmalloc.h>
+#include <linux/task_integrity.h>
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -72,6 +73,10 @@
 #include "internal.h"
 
 #include <trace/events/sched.h>
+
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+#endif
 
 int suid_dumpable = 0;
 
@@ -454,6 +459,9 @@ static int prepare_arg_pages(struct linux_binprm *bprm,
 	unsigned long limit, ptr_size;
 
 	bprm->argc = count(argv, MAX_ARG_STRINGS);
+	if (bprm->argc == 0)
+		pr_warn_once("process '%s' launched '%s' with NULL argv: empty string added\n",
+			     current->comm, bprm->filename);
 	if (bprm->argc < 0)
 		return bprm->argc;
 
@@ -482,8 +490,14 @@ static int prepare_arg_pages(struct linux_binprm *bprm,
 	 * the stack. They aren't stored until much later when we can't
 	 * signal to the parent that the child has run out of stack space.
 	 * Instead, calculate it here so it's possible to fail gracefully.
+	 *
+	 * In the case of argc = 0, make sure there is space for adding a
+	 * empty string (which will bump argc to 1), to ensure confused
+	 * userspace programs don't start processing from argv[1], thinking
+	 * argc can never be 0, to keep them from walking envp by accident.
+	 * See do_execveat_common().
 	 */
-	ptr_size = (bprm->argc + bprm->envc) * sizeof(void *);
+	ptr_size = (max(bprm->argc, 1) + bprm->envc) * sizeof(void *);
 	if (limit <= ptr_size)
 		return -E2BIG;
 	limit -= ptr_size;
@@ -1052,6 +1066,10 @@ static int exec_mmap(struct mm_struct *mm)
 		local_irq_enable();
 	tsk->mm->vmacache_seqnum = 0;
 	vmacache_flush(tsk);
+#ifdef CONFIG_KDP_CRED
+	if (kdp_enable)
+		uh_call(UH_APP_KDP, SET_CRED_PGD, (u64)current_cred(), (u64)mm->pgd, 0, 0);
+#endif
 	task_unlock(tsk);
 	if (old_mm) {
 		up_read(&old_mm->mmap_sem);
@@ -1293,6 +1311,13 @@ int flush_old_exec(struct linux_binprm * bprm)
 	 * Release all of the old mmap stuff
 	 */
 	acct_arg_size(bprm, 0);
+#ifdef CONFIG_KDP_NS
+	/*
+	if (kdp_enable && is_kdp_priv_task() && invalid_drive(bprm)) {
+		panic("[KDP] Illegal Execution of file #%s#\n", bprm->filename);
+	}
+	*/
+#endif
 	retval = exec_mmap(bprm->mm);
 	if (retval)
 		goto out;
@@ -1720,6 +1745,8 @@ static int exec_binprm(struct linux_binprm *bprm)
 		trace_sched_process_exec(current, old_pid, bprm);
 		ptrace_event(PTRACE_EVENT_EXEC, old_vpid);
 		proc_exec_connector(current);
+	} else {
+		task_integrity_delayed_reset(current, CAUSE_EXEC, bprm->file);
 	}
 
 	return ret;
@@ -1779,6 +1806,16 @@ static int __do_execve_file(int fd, struct filename *filename,
 	if (IS_ERR(file))
 		goto out_unmark;
 
+#ifdef CONFIG_SECURITY_DEFEX
+	retval = task_defex_enforce(current, file, -__NR_execve);
+	if (retval < 0) {
+		bprm->file = file;
+		bprm->filename = "none";
+		retval = -EPERM;
+		goto out_unmark;
+	 }
+#endif
+
 	sched_exec();
 
 	bprm->file = file;
@@ -1831,6 +1868,20 @@ static int __do_execve_file(int fd, struct filename *filename,
 	retval = copy_strings(bprm->argc, argv, bprm);
 	if (retval < 0)
 		goto out;
+
+	/*
+	 * When argv is empty, add an empty string ("") as argv[0] to
+	 * ensure confused userspace programs that start processing
+	 * from argv[1] won't end up walking envp. See also
+	 * bprm_stack_limits().
+	 */
+	if (bprm->argc == 0) {
+		const char *argv[] = { "", NULL };
+		retval = copy_strings_kernel(1, argv, bprm);
+		if (retval < 0)
+			goto out;
+		bprm->argc = 1;
+	}
 
 	retval = exec_binprm(bprm);
 	if (retval < 0)
@@ -1971,6 +2022,29 @@ SYSCALL_DEFINE3(execve,
 		const char __user *const __user *, argv,
 		const char __user *const __user *, envp)
 {
+#ifdef CONFIG_KDP_CRED
+	struct filename *path = getname(filename);
+	int error = PTR_ERR(path);
+
+	if (IS_ERR(path))
+		return error;
+
+	if (kdp_enable) {
+		uh_call(UH_APP_KDP, MARK_PPT, (u64)path->name, (u64)current, 0, 0);
+		if (current->cred->uid.val == 0 || current->cred->gid.val == 0 ||
+			current->cred->euid.val == 0 || current->cred->egid.val == 0 ||
+			current->cred->suid.val == 0 || current->cred->sgid.val == 0) {
+			if (kdp_restrict_fork(path)) {
+				pr_warn("RKP_KDP Restricted making process. PID = %d(%s) PPID = %d(%s)\n",
+						current->pid, current->comm,
+						current->parent->pid, current->parent->comm);
+				putname(path);
+				return -EACCES;
+			}
+		}
+	}
+	putname(path);
+#endif
 	return do_execve(getname(filename), argv, envp);
 }
 

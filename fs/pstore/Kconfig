@@ -118,12 +118,27 @@ config PSTORE_CONSOLE
 config PSTORE_PMSG
 	bool "Log user space messages"
 	depends on PSTORE
+	select RT_MUTEXES
 	help
 	  When the option is enabled, pstore will export a character
 	  interface /dev/pmsg0 to log user space messages. On reboot
 	  data can be retrieved from /sys/fs/pstore/pmsg-ramoops-[ID].
 
 	  If unsure, say N.
+
+config PSTORE_PMSG_SSPLOG
+	bool "Log user space messages for SS Platform log"
+	depends on PSTORE_PMSG
+	select SEC_EVENT_LOG
+	help
+	  When the option is enabled, pmsg will save log at reserved
+	  dram area.
+
+	  If unsure, say N.
+
+config SEC_EVENT_LOG
+	bool "Enable Event log parser"
+	default n
 
 config PSTORE_FTRACE
 	bool "Persistent function tracer"

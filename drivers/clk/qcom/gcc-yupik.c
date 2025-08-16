@@ -1181,6 +1181,7 @@ static struct clk_rcg2 gcc_sdcc1_ice_core_clk_src = {
 };
 
 static const struct freq_tbl ftbl_gcc_sdcc2_apps_clk_src[] = {
+	F(300000, P_BI_TCXO, 32, 1, 2),
 	F(400000, P_BI_TCXO, 12, 1, 4),
 	F(19200000, P_BI_TCXO, 1, 0, 0),
 	F(25000000, P_GCC_GPLL0_OUT_EVEN, 12, 0, 0),
@@ -2168,6 +2169,19 @@ static struct clk_branch gcc_pcie_clkref_en = {
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "gcc_pcie_clkref_en",
+			.ops = &clk_branch2_ops,
+		},
+	},
+};
+
+static struct clk_branch gcc_edp_clkref_en = {
+	.halt_reg = 0x8c008,
+	.halt_check = BRANCH_HALT,
+	.clkr = {
+		.enable_reg = 0x8c008,
+		.enable_mask = BIT(0),
+		.hw.init = &(struct clk_init_data){
+			.name = "gcc_edp_clkref_en",
 			.ops = &clk_branch2_ops,
 		},
 	},
@@ -3510,6 +3524,7 @@ static struct clk_regmap *gcc_yupik_clocks[] = {
 	[GCC_VIDEO_AXI0_CLK] = &gcc_video_axi0_clk.clkr,
 	[GCC_VIDEO_MVP_THROTTLE_CORE_CLK] =
 		&gcc_video_mvp_throttle_core_clk.clkr,
+	[GCC_EDP_CLKREF_EN] = &gcc_edp_clkref_en.clkr,
 };
 
 static const struct qcom_reset_map gcc_yupik_resets[] = {

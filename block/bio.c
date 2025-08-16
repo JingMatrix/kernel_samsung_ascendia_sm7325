@@ -23,6 +23,10 @@
 #include "blk.h"
 #include "blk-rq-qos.h"
 
+#ifdef CONFIG_DDAR
+extern int fscrypt_dd_encrypted(struct bio *bio);
+#endif
+
 /*
  * Test patch to inline a certain number of bi_io_vec's inside the bio
  * itself, to shrink a bio data allocation from two mempool calls to one
@@ -809,6 +813,11 @@ bool __bio_try_merge_page(struct bio *bio, struct page *page,
 
 		if (page == bv->bv_page && off == bv->bv_offset + bv->bv_len) {
 			*same_page = true;
+#ifdef CONFIG_DDAR
+			if ((*same_page == false) && fscrypt_dd_encrypted(bio)) {
+				return false;
+			}
+#endif
 			bv->bv_len += len;
 			bio->bi_iter.bi_size += len;
 			return true;
@@ -1625,7 +1634,7 @@ struct bio *bio_copy_kern(struct request_queue *q, void *data, unsigned int len,
 		if (bytes > len)
 			bytes = len;
 
-		page = alloc_page(q->bounce_gfp | gfp_mask);
+		page = alloc_page(q->bounce_gfp | __GFP_ZERO | gfp_mask);
 		if (!page)
 			goto cleanup;
 
@@ -2181,7 +2190,7 @@ void bio_clone_blkg_association(struct bio *dst, struct bio *src)
 	rcu_read_lock();
 
 	if (src->bi_blkg)
-		__bio_associate_blkg(dst, src->bi_blkg);
+		bio_associate_blkg_from_css(dst, &bio_blkcg(src)->css);
 
 	rcu_read_unlock();
 }

@@ -162,6 +162,9 @@ static int hidinput_setkeycode(struct input_dev *dev,
 				usage->code : KEY_RESERVED;
 		usage->code = ke->keycode;
 
+		if (usage->code > KEY_MAX || *old_keycode > KEY_MAX)
+			return -EINVAL;
+
 		clear_bit(*old_keycode, dev->keybit);
 		set_bit(usage->code, dev->keybit);
 		dbg_hid("Assigned keycode %d to HID usage code %x\n",
@@ -671,6 +674,14 @@ static void hidinput_configure_usage(struct hid_input *hidinput, struct hid_fiel
 			break;
 		}
 
+		if ((usage->hid & 0xf0) == 0xa0) {	/* SystemControl */
+			switch (usage->hid & 0xf) {
+			case 0x9: map_key_clear(KEY_MICMUTE); break;
+			default: goto ignore;
+			}
+			break;
+		}
+
 		if ((usage->hid & 0xf0) == 0xb0) {	/* SC - Display */
 			switch (usage->hid & 0xf) {
 			case 0x05: map_key_clear(KEY_SWITCHVIDEOMODE); break;
@@ -956,6 +967,7 @@ static void hidinput_configure_usage(struct hid_input *hidinput, struct hid_fiel
 		case 0x0cd: map_key_clear(KEY_PLAYPAUSE);	break;
 		case 0x0cf: map_key_clear(KEY_VOICECOMMAND);	break;
 
+		case 0x0d8: map_key_clear(KEY_DICTATE);		break;
 		case 0x0d9: map_key_clear(KEY_EMOJI_PICKER);	break;
 
 		case 0x0e0: map_abs_clear(ABS_VOLUME);		break;
@@ -1046,6 +1058,8 @@ static void hidinput_configure_usage(struct hid_input *hidinput, struct hid_fiel
 		case 0x28c: map_key_clear(KEY_SEND);		break;
 
 		case 0x29d: map_key_clear(KEY_KBD_LAYOUT_NEXT);	break;
+
+		case 0x2a2: map_key_clear(KEY_ALL_APPLICATIONS);	break;
 
 		case 0x2c7: map_key_clear(KEY_KBDINPUTASSIST_PREV);		break;
 		case 0x2c8: map_key_clear(KEY_KBDINPUTASSIST_NEXT);		break;
@@ -1571,6 +1585,7 @@ static void hidinput_close(struct input_dev *dev)
 	hid_hw_close(hid);
 }
 
+#if 0
 static bool __hidinput_change_resolution_multipliers(struct hid_device *hid,
 		struct hid_report *report, bool use_logical_max)
 {
@@ -1641,6 +1656,7 @@ static void hidinput_change_resolution_multipliers(struct hid_device *hid)
 	/* refresh our structs */
 	hid_setup_resolution_multiplier(hid);
 }
+#endif
 
 static void report_features(struct hid_device *hid)
 {
@@ -1935,7 +1951,7 @@ int hidinput_connect(struct hid_device *hid, unsigned int force)
 		}
 	}
 
-	hidinput_change_resolution_multipliers(hid);
+	//hidinput_change_resolution_multipliers(hid);
 
 	list_for_each_entry_safe(hidinput, next, &hid->inputs, list) {
 		if (drv->input_configured &&

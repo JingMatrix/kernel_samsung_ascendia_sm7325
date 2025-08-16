@@ -138,6 +138,7 @@ struct f_cdev {
 	unsigned long		nbytes_from_port_bridge;
 
 	struct dentry		*debugfs_root;
+	bool			setup_pending;
 
 	/* To test remote wakeup using debugfs */
 	u8 debugfs_rw_enable;
@@ -548,6 +549,7 @@ static int usb_cser_set_alt(struct usb_function *f, unsigned int intf,
 }
 
 static int port_notify_serial_state(struct cserial *cser);
+static void usb_cser_start_rx(struct f_cdev *port);
 
 static void usb_cser_resume(struct usb_function *f)
 {
@@ -566,6 +568,15 @@ static void usb_cser_resume(struct usb_function *f)
 		port_notify_serial_state(&port->port_usb);
 
 	spin_lock_irqsave(&port->port_lock, flags);
+
+	/* process pending read request */
+	if (port->setup_pending) {
+		pr_info("%s: start_rx called due to rx_out error.\n", __func__);
+		port->setup_pending = false;
+		spin_unlock_irqrestore(&port->port_lock, flags);
+		usb_cser_start_rx(port);
+		spin_lock_irqsave(&port->port_lock, flags);
+	}
 	in = port->port_usb.in;
 	/* process any pending requests */
 	list_for_each_entry_safe(req, t, &port->write_pending, list) {
@@ -1055,7 +1066,10 @@ static void usb_cser_start_rx(struct f_cdev *port)
 			pr_err("port(%d):%pK usb ep(%s) queue failed\n",
 					port->port_num, port, ep->name);
 			list_add(&req->list, pool);
+			port->setup_pending = true;
 			break;
+		} else {
+			port->setup_pending = false;
 		}
 	}
 
@@ -1603,6 +1617,7 @@ static long f_cdev_ioctl(struct file *fp, unsigned int cmd,
 	int i = 0;
 	uint32_t val;
 	struct f_cdev *port;
+	unsigned long flags;
 
 	port = fp->private_data;
 	if (!port) {
@@ -1627,7 +1642,9 @@ static long f_cdev_ioctl(struct file *fp, unsigned int cmd,
 		ret = f_cdev_tiocmget(port);
 		if (ret >= 0) {
 			ret = put_user(ret, (uint32_t *)arg);
+			spin_lock_irqsave(&port->port_lock, flags);
 			port->cbits_updated = false;
+			spin_unlock_irqrestore(&port->port_lock, flags);
 		}
 		break;
 	default:
@@ -1644,6 +1661,7 @@ static void usb_cser_notify_modem(void *fport, int ctrl_bits)
 	int temp;
 	struct f_cdev *port = fport;
 	struct cserial *cser;
+	unsigned long flags;
 
 	cser = &port->port_usb;
 	if (!port) {
@@ -1658,8 +1676,10 @@ static void usb_cser_notify_modem(void *fport, int ctrl_bits)
 	if (temp == port->cbits_to_modem)
 		return;
 
+	spin_lock_irqsave(&port->port_lock, flags);
 	port->cbits_to_modem = temp;
 	port->cbits_updated = true;
+	spin_unlock_irqrestore(&port->port_lock, flags);
 
 	 /* if DTR is high, update latest modem info to laptop */
 	if (port->cbits_to_modem & TIOCM_DTR) {
@@ -1932,7 +1952,7 @@ static struct f_cdev *f_cdev_alloc(char *func_name, int portno)
 	port->dev.parent = NULL;
 	port->dev.release = cdev_device_release;
 	port->dev.devt = MKDEV(major, port->minor);
-	dev_set_name(&port->dev, port->name);
+	dev_set_name(&port->dev, "%s", port->name);
 	ret = cdev_device_add(&port->fcdev_cdev, &port->dev);
 	if (ret) {
 		pr_err("Failed to add cdev for port(%s)\n", port->name);

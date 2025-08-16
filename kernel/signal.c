@@ -56,6 +56,9 @@
 #include <asm/unistd.h>
 #include <asm/siginfo.h>
 #include <asm/cacheflush.h>
+#ifdef CONFIG_SAMSUNG_FREECESS
+#include <linux/freecess.h>
+#endif
 
 /*
  * SLAB caches for signal bits.
@@ -1213,6 +1216,16 @@ static int send_signal(int sig, struct kernel_siginfo *info, struct task_struct 
 	/* Should SIGKILL or SIGSTOP be received by a pid namespace init? */
 	bool force = false;
 
+	/* [SystemF/W, si_code is 0 : from userspace, si_code is over 0 : from kernel */
+	if (!is_si_special(info)) {
+		if ((current->pid != 1) && ((sig == SIGKILL && !strncmp("main", t->group_leader->comm, 4))
+				|| (sig == SIGKILL && !strncmp("system_server", t->group_leader->comm, 13)))) {
+			pr_info("Send signal %d from %s(%d) to %s(%d) : %d\n",
+						sig, current->comm, current->pid, t->comm, t->pid, info->si_code);
+		}
+	}
+	/* SystemF/W]*/
+
 	if (info == SEND_SIG_NOINFO) {
 		/* Force if sent from an ancestor pid namespace */
 		force = !task_pid_nr_ns(current, task_active_pid_ns(t));
@@ -1287,6 +1300,16 @@ int do_send_sig_info(int sig, struct kernel_siginfo *info, struct task_struct *p
 {
 	unsigned long flags;
 	int ret = -ESRCH;
+#ifdef CONFIG_SAMSUNG_FREECESS
+	/*
+	 * System will send SIGIO to the app that locked the file when other apps access the file.
+	 * Report SIGIO to prevent other apps from getting stuck
+	 */
+	 if ((sig == SIGKILL || sig == SIGTERM || sig == SIGABRT || sig == SIGQUIT || sig == SIGIO)) {
+ 		// Report pid if process is killed/stopped.
+ 		sig_report(p, sig != SIGIO);
+ 	}
+#endif
 
 	if (lock_task_sighand(p, &flags)) {
 		ret = send_signal(sig, info, p, type);
@@ -1924,12 +1947,12 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 	bool autoreap = false;
 	u64 utime, stime;
 
-	BUG_ON(sig == -1);
+	WARN_ON_ONCE(sig == -1);
 
- 	/* do_notify_parent_cldstop should have been called instead.  */
- 	BUG_ON(task_is_stopped_or_traced(tsk));
+	/* do_notify_parent_cldstop should have been called instead.  */
+	WARN_ON_ONCE(task_is_stopped_or_traced(tsk));
 
-	BUG_ON(!tsk->ptrace &&
+	WARN_ON_ONCE(!tsk->ptrace &&
 	       (tsk->group_leader != tsk || !thread_group_empty(tsk)));
 
 	/* Wake up all pidfd waiters */
